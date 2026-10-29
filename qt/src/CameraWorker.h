@@ -47,6 +47,14 @@ public slots:
     // experimental 15 s status cadence (opt-in setting — see setGestureFriendly).
     void cmdSetGesture(bool on, bool lowTraffic);
     void cmdSetHdr(bool on);                           // cameraSetWdrR
+    // AI tracking speed, UI index 0=Slow, 1=Standard, 2=Fast, sent as the tail2+
+    // control parameter GimCtrlSpeedMode (SuperLazy / Slow / Fast). Verified on
+    // Tiny 3 by readback and by eye; aiSetTrackSpeedTypeR has no effect there.
+    void cmdSetTrackSpeed(int idx);
+    void cmdReadTrackSpeed();
+    // AI auto-zoom framing (aiSetTargetZoomTypeR, DevTargetZoomType value).
+    // Verified on Tiny 3 while tracking; readback = status ai_sub_mode.
+    void cmdSetAutoZoom(int zoomType);
     // Auto-sleep timer (cameraSetSuspendTimeU; <=0 disables auto-sleep) and
     // mic-during-sleep (cameraSetMicrophoneDuringSleepU). The SDK category
     // docs omit the Tiny 3 for BOTH — rc + the status push's sleep_micro
@@ -55,6 +63,15 @@ public slots:
     void cmdSetMicSleep(bool on);
     void cmdSetImage(const QString &param, int value); // brightness/contrast/saturation/sharpness (0–100)
     void cmdReadImageParams();                         // read current image params on connect
+    // Limit-area ("zone") tracking via the tail2+ control-parameter API
+    // (aiSet/GetControlParaR, target Human). Limits are degrees; every write is
+    // read back and the readback is the verdict (rc alone is meaningless here).
+    void cmdReadZone();
+    void cmdSetZoneLimits(double panMin, double panMax, double pitchMin, double pitchMax);
+    void cmdSetZoneTracking(bool on);
+    // Reads the gimbal attitude and reports it for one zone edge: yaw for
+    // "panMin"/"panMax", pitch for "pitchMin"/"pitchMax".
+    void cmdCaptureZoneEdge(const QString &edge);
     void cmdPresetCapture(int idx);
     void cmdPresetGo(int idx, double pitch, double yaw, double zoom, int fov, double speed);
 
@@ -102,6 +119,17 @@ signals:
     void auxStatus(bool faceFocus, bool hdrOn, bool hdrSupport, int fps, int sleepMicro, int autoSleepSec);
     void zoomUpdate(double zoom, bool valid);
     void imageParams(int brightness, int contrast, int saturation, int sharpness);
+    // ok=false when the device did not answer the zone getters. def* are the
+    // device's default (widest) limits, used as the editing bounds.
+    void zoneParams(bool ok, bool tracking, double panMin, double panMax, double pitchMin,
+                    double pitchMax, double defPanMin, double defPanMax, double defPitchMin,
+                    double defPitchMax);
+    void zoneEdgeCaptured(const QString &edge, bool ok, double value);
+    // Device tracking speed as a UI index (0..2), or -1 when unreadable or set
+    // to a mode the UI does not offer (Lazy / Crazy / Custom).
+    void trackSpeedUpdate(int idx);
+    // Device ai_sub_mode from each status push (AI framing readback).
+    void aiSubModeUpdate(int subMode);
     void commandResult(const QString &action, bool ok, int rc, const QString &message);
     void presetCaptured(int idx, double pitch, double yaw, double zoom, int fov);
 
@@ -114,6 +142,11 @@ private:
     // CODE_REVIEW #4: never log a fake "(ok)" for a move the device will ignore.
     bool aiOwnsGimbal(const QString &action);
     void refreshZoom();
+    // Reads tracker type + current/default limits, emits zoneParams, and returns
+    // whether every getter succeeded (out-params hold the current values).
+    bool readZone(bool &tracking, float cur[4]);
+    // Reads GimCtrlSpeedMode, emits trackSpeedUpdate, returns the UI index (-1 if none).
+    int readTrackSpeed();
     // Gesture-friendly mode: open a one-push status window NOW (closed again by
     // onSdkStatus). Called after state-changing commands (wake/sleep/AI/preset)
     // so their effects reach the UI immediately instead of at the next duty
@@ -121,7 +154,7 @@ private:
     // The command itself just made traffic, so this pulse costs nothing extra
     // with respect to recognizer suppression.
     void statusPulse();
-    void onSdkStatus(int runStatus, int aiMode, int faceFocus, int hdr, int hdrSupport, int fps, int sleepMicro, int autoSleepSec);
+    void onSdkStatus(int runStatus, int aiMode, int faceFocus, int hdr, int hdrSupport, int fps, int sleepMicro, int autoSleepSec, int aiSubMode);
     void onDevChanged(const QString &sn, bool plugged);
 
     static void sdkStatusTrampoline(void *param, const void *data);

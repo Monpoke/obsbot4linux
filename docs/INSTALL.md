@@ -156,3 +156,5 @@ host GL/X11 libraries so the target's own drivers are used. See
 | `QRhiGles2: Failed to create context` | `QT_QUICK_BACKEND=software ./…AppImage`. |
 | Wants a specific platform | `QT_QPA_PLATFORM=xcb` (or `wayland`) before the binary. |
 | Preview shows MJPEG warnings | Harmless camera-stream quirks; the app runs `ffplay -loglevel error` to hide them. |
+| AI Track is on (LED blue or purple) but the camera does not follow | The Tiny 3 only tracks while something reads the video stream: start the in-app preview (or OBS). Also make sure the camera is awake. |
+| OBS shows no image (log: `failed to unpack jpeg` / `Stopped capture after 0 frames`) | OBS's V4L2 source stops for good if the first MJPEG frame fails to decode: re-select the device in the source properties, or switch its video format to YUYV. Keep the app's preview off while OBS uses the camera (only one app can stream at a time). |

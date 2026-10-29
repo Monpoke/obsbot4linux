@@ -67,6 +67,32 @@ cd sdk-probe
 Exit code `0` = at least one OBSBOT device found; non-zero otherwise.
 Commands act on `--sn` if given, else the first discovered device.
 
+### Feature probes (Tiny 3 investigation)
+
+Each probe sends one SDK command, prints its `rc`, then the **device readback**
+(status push and/or getter). On the Tiny 3 `rc=0` proves nothing — it is
+returned for ignored commands too — so only the readback counts. AI tracking
+also needs an open video stream (e.g. a `gst-launch-1.0 v4l2src ! …` preview).
+
+```bash
+./obsbot-sdk-probe --track off|solo|group          # cameraSetAiModeU
+./obsbot-sdk-probe --auto-zoom off|full|upper|closeup|headless|lower|adaptive
+./obsbot-sdk-probe --hdr on|off                    # cameraSetWdrR
+./obsbot-sdk-probe --cspeed-read                   # GimCtrlSpeedMode (works on Tiny 3)
+./obsbot-sdk-probe --cspeed 0..4                   # 0 SuperLazy .. 4 Crazy
+./obsbot-sdk-probe --czone-read                    # limit-area params (works on Tiny 3)
+./obsbot-sdk-probe --czone-limits PANMIN PANMAX PITCHMIN PITCHMAX   # raw device values
+./obsbot-sdk-probe --czone on|off                  # TrackerType LimitArea / Normal
+./obsbot-sdk-probe --czone-autoselect on|off
+# Calls that turned out to have NO effect on the Tiny 3 (kept for comparison):
+./obsbot-sdk-probe --track-speed lazy|slow|standard|fast|crazy|auto   # aiSetTrackSpeedTypeR
+./obsbot-sdk-probe --track-alt off|solo|group      # aiSetAiTrackModeEnabledR
+./obsbot-sdk-probe --zone on|off | --zone-state on|off | --zone-limits … | --zone-read
+```
+
+`--czone-limits` takes the camera's raw values: pitch is stored down-positive,
+so the Windows app's "top 10" is `PITCHMIN -10`.
+
 ## Runtime library loading (how `libdev.so` is found)
 
 The SDK's `SONAME` is `libdev.so.1.0.3`, so the loader looks for exactly that
@@ -96,10 +122,12 @@ LD_LIBRARY_PATH=../libdev_v2.1.0_8/linux/x86_64-release ./obsbot-sdk-probe
 
 ## Safety notes
 
-Only low-risk commands are wired up: run/sleep state, a status read, and a
+The original commands are low-risk: run/sleep state, a status read, and a
 single gimbal **reset to zero** (`gimbalRstPosR()`). There are **no** movement
 loops, speed-control bursts, or angle sweeps. `--wake` and `--sleep` are
-mutually exclusive.
+mutually exclusive. The feature probes above change settings stored in the
+camera (tracking mode, zone limits, speed, HDR): note the values first
+(`--czone-read`, `--cspeed-read`, `--status`) if you want to restore them.
 
 ## Known limitations
 

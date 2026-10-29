@@ -65,7 +65,7 @@ ln -sf appimagetool-x86_64.AppImage "$TOOLS/appimagetool"
 # --- configure + build + install into AppDir --------------------------------
 rm -rf "$BUILD" "$APPDIR"
 cmake -S "$QT_DIR" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF
-cmake --build "$BUILD" -j
+cmake --build "$BUILD" -j "${JOBS:-$(nproc)}"
 DESTDIR="$APPDIR" cmake --install "$BUILD" --prefix /usr
 
 # --- bundle the OBSBOT SDK (.so + SONAME symlink) ---------------------------
@@ -145,4 +145,5 @@ rm -f "$APPDIR"/usr/lib/libxcb*.so*        "$APPDIR"/usr/lib/libX11*.so* \
 rm -f "$OUT"
 ARCH=x86_64 "$TOOLS/appimagetool" "$APPDIR" "$OUT"
 chmod +x "$OUT"
-echo ">> done: $OUT"
+install -m 755 "$HERE/install-runtime-deps.sh" "$DIST/"
+echo ">> done: $OUT (+ $DIST/install-runtime-deps.sh)"

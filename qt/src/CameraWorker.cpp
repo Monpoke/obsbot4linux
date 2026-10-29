@@ -24,6 +24,32 @@ constexpr int kStatusDutyMs = 15000;
 
 float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+// Zone limits in the order used by cmdSetZoneLimits/zoneParams. The older
+// LimitedZoneTrack API times out on Tiny 3 (fw 6.6.11.1); these tail2+ control
+// parameters read back exactly and the gimbal stops at the limits while AI
+// tracking (hardware-verified with sdk-probe --czone*).
+const Device::DevControlParaType kZoneLimitTypes[4] = {
+    Device::DevControlParaTypeLimitPanMin, Device::DevControlParaTypeLimitPanMax,
+    Device::DevControlParaTypeLimitPitchMin, Device::DevControlParaTypeLimitPitchMax};
+
+// Tracking speed UI index (Slow / Standard / Fast) -> GimCtrlSpeedMode. On
+// Tiny 3 the header's own Tiny 3 notes list super-lazy / slow / fast, and the
+// device default reads back as Slow, which is the Windows app's "standard".
+const Device::DevGimCtrlSpeedMode kTrackSpeedModes[3] = {
+    Device::DevGimCtrlSpeedModeSuperLazy, Device::DevGimCtrlSpeedModeSlow,
+    Device::DevGimCtrlSpeedModeFast};
+
+// The device counts limit pitch DOWN-positive, while gimbalGetAttitudeInfoR
+// (and this app's UI) counts pitch UP-positive (hardware finding: applying
+// UP-positive values inverted the top/bottom limits). Pan needs no change.
+// Converts limits [panMin, panMax, pitchMin, pitchMax] between the two spaces;
+// the mapping (negate + swap min/max) is its own inverse.
+void flipZonePitch(float v[4]) {
+    const float lo = v[2];
+    v[2] = -v[3];
+    v[3] = -lo;
+}
+
 // RunState enum mirrored by CameraController: 0=Unknown, 1=Awake, 2=Asleep.
 int runStateFromDev(int devStatus) {
     switch (devStatus) {
@@ -173,6 +199,8 @@ void CameraWorker::bindDevice(const std::shared_ptr<Device> &d) {
     // Read real zoom + current image params once now (blocking getters, safe here).
     refreshZoom();
     cmdReadImageParams();
+    cmdReadZone();
+    cmdReadTrackSpeed();
 }
 
 // ---------------------------------------------------------------------------
@@ -190,13 +218,14 @@ void CameraWorker::sdkStatusTrampoline(void *param, const void *data) {
     const int fps = st->tiny.fps;                // current video stream fps
     const int sleepMicro = st->tiny.sleep_micro; // mic during sleep 0/1 (readback for cmdSetMicSleep)
     const int autoSleep = st->tiny.auto_sleep_time; // seconds, 0=never (readback for cmdSetAutoSleep)
+    const int sub = st->tiny.ai_sub_mode;        // AI framing (readback for cmdSetAutoZoom)
     // Do NOT touch SDK/Qt state here — just marshal onto the worker thread.
     QMetaObject::invokeMethod(
-        self, [self, run, ai, face, hdr, hdrSup, fps, sleepMicro, autoSleep]() { self->onSdkStatus(run, ai, face, hdr, hdrSup, fps, sleepMicro, autoSleep); },
+        self, [self, run, ai, face, hdr, hdrSup, fps, sleepMicro, autoSleep, sub]() { self->onSdkStatus(run, ai, face, hdr, hdrSup, fps, sleepMicro, autoSleep, sub); },
         Qt::QueuedConnection);
 }
 
-void CameraWorker::onSdkStatus(int runStatus, int aiMode, int faceFocus, int hdr, int hdrSupport, int fps, int sleepMicro, int autoSleepSec) {
+void CameraWorker::onSdkStatus(int runStatus, int aiMode, int faceFocus, int hdr, int hdrSupport, int fps, int sleepMicro, int autoSleepSec, int aiSubMode) {
     if (m_shuttingDown || !m_dev) return;
     // Gesture-friendly cadence: this push is the duty cycle's one shot — close
     // the window again so the control channel goes quiet for the recognizer.
@@ -238,6 +267,7 @@ void CameraWorker::onSdkStatus(int runStatus, int aiMode, int faceFocus, int hdr
     // serialized with commands — never on the SDK callback thread.
     float z = 0.0f;
     const bool zok = (m_dev->cameraGetZoomAbsoluteR(z) == RM_RET_OK);
+    emit aiSubModeUpdate(aiSubMode);
     emit statusUpdate(runStateFromDev(runStatus), aiMode, z, zok);
     emit auxStatus(faceFocus != 0, hdr != 0, hdrSupport != 0, fps, sleepMicro, autoSleepSec);
 }
@@ -537,6 +567,49 @@ void CameraWorker::cmdSetHdr(bool on) {
     emit logLine(ok ? "ok" : "warn", QStringLiteral("hdr %1  rc=%2").arg(on ? "on" : "off").arg(rc));
 }
 
+int CameraWorker::readTrackSpeed() {
+    int mode = -1;
+    int idx = -1;
+    if (m_dev->aiGetControlParaR(Device::DevControlTargetTypeHuman,
+                                 Device::DevControlParaTypeGimCtrlSpeedMode, mode) == RM_RET_OK) {
+        for (int i = 0; i < 3; ++i)
+            if (kTrackSpeedModes[i] == mode) idx = i;
+    }
+    emit trackSpeedUpdate(idx);
+    return idx;
+}
+
+void CameraWorker::cmdReadTrackSpeed() {
+    if (!m_dev) return;
+    readTrackSpeed();
+}
+
+void CameraWorker::cmdSetTrackSpeed(int idx) {
+    const QString a = QStringLiteral("track speed");
+    if (!requireDevice(a)) return;
+    static const char *kNames[3] = {"slow", "standard", "fast"};
+    const int i = idx < 0 ? 0 : (idx > 2 ? 2 : idx);
+    const int rc = m_dev->aiSetControlParaR(Device::DevControlTargetTypeHuman,
+                                            Device::DevControlParaTypeGimCtrlSpeedMode,
+                                            int(kTrackSpeedModes[i]));
+    const bool ok = (readTrackSpeed() == i);
+    emit commandResult(a, ok, rc, QString::fromLatin1(kNames[i]));
+    emit logLine(ok ? "ok" : "warn", QStringLiteral("track speed %1  rc=%2%3")
+                                         .arg(QString::fromLatin1(kNames[i])).arg(rc)
+                                         .arg(ok ? QString() : QStringLiteral(" — device state does NOT match")));
+}
+
+void CameraWorker::cmdSetAutoZoom(int zoomType) {
+    const QString a = QStringLiteral("auto zoom");
+    if (!requireDevice(a)) return;
+    const int rc = m_dev->aiSetTargetZoomTypeR(static_cast<Device::DevTargetZoomType>(zoomType));
+    const bool ok = (rc == RM_RET_OK);
+    emit commandResult(a, ok, rc, QString::number(zoomType));
+    emit logLine(ok ? "ok" : "warn", QStringLiteral("auto zoom type %1  rc=%2 (device framing shows in the next status push)")
+                                         .arg(zoomType).arg(rc));
+    statusPulse();   // fetch the ai_sub_mode readback promptly in low-traffic mode
+}
+
 void CameraWorker::cmdSetAutoSleep(int seconds, const QString &label) {
     const QString a = QStringLiteral("auto sleep");
     if (!requireDevice(a)) return;
@@ -589,6 +662,90 @@ void CameraWorker::cmdReadImageParams() {
     m_dev->cameraGetImageSaturationR(s);
     m_dev->cameraGetImageSharpR(sh);
     emit imageParams(b, c, s, sh);
+}
+
+bool CameraWorker::readZone(bool &tracking, float cur[4]) {
+    const auto H = Device::DevControlTargetTypeHuman;
+    int tracker = -1;
+    float def[4] = {0, 0, 0, 0};
+    bool ok = m_dev->aiGetControlParaR(H, Device::DevControlParaTypeTrackerType, tracker) == RM_RET_OK;
+    for (int i = 0; i < 4; ++i) {
+        cur[i] = 0.0f;
+        ok = ok && m_dev->aiGetControlParaR(H, kZoneLimitTypes[i], cur[i], false) == RM_RET_OK;
+        ok = ok && m_dev->aiGetControlParaR(H, kZoneLimitTypes[i], def[i], true) == RM_RET_OK;
+    }
+    tracking = (tracker == Device::DevTrackTypeLimitArea);
+    flipZonePitch(cur);   // device space -> UI space (pitch up-positive)
+    flipZonePitch(def);
+    emit zoneParams(ok, tracking, cur[0], cur[1], cur[2], cur[3], def[0], def[1], def[2], def[3]);
+    return ok;
+}
+
+void CameraWorker::cmdReadZone() {
+    if (!m_dev) return;
+    bool tracking = false;
+    float cur[4];
+    if (!readZone(tracking, cur))
+        emit logLine("warn", QStringLiteral("zone: limit parameters not readable on this device"));
+}
+
+void CameraWorker::cmdSetZoneLimits(double panMin, double panMax, double pitchMin, double pitchMax) {
+    const QString a = QStringLiteral("zone limits");
+    if (!requireDevice(a)) return;
+    const float want[4] = {float(panMin), float(panMax), float(pitchMin), float(pitchMax)};
+    float dev[4] = {want[0], want[1], want[2], want[3]};
+    flipZonePitch(dev);   // UI space -> device space
+    emit logLine("cmd", QStringLiteral("→ zone limits pan %1..%2°, tilt %3..%4°")
+                            .arg(panMin, 0, 'f', 1).arg(panMax, 0, 'f', 1)
+                            .arg(pitchMin, 0, 'f', 1).arg(pitchMax, 0, 'f', 1));
+    int rc = RM_RET_OK;
+    for (int i = 0; i < 4; ++i) {
+        const int r = m_dev->aiSetControlParaR(Device::DevControlTargetTypeHuman, kZoneLimitTypes[i], dev[i]);
+        if (r != RM_RET_OK) rc = r;
+    }
+    bool tracking = false;
+    float got[4];
+    bool ok = readZone(tracking, got);
+    for (int i = 0; i < 4; ++i) ok = ok && std::fabs(got[i] - want[i]) < 0.5f;
+    emit commandResult(a, ok, rc, ok ? QStringLiteral("applied") : QStringLiteral("device kept other limits"));
+    emit logLine(ok ? "ok" : "warn",
+                 QStringLiteral("zone limits  rc=%1, device reports pan %2..%3°, tilt %4..%5°%6")
+                     .arg(rc).arg(got[0], 0, 'f', 1).arg(got[1], 0, 'f', 1)
+                     .arg(got[2], 0, 'f', 1).arg(got[3], 0, 'f', 1)
+                     .arg(ok ? QString() : QStringLiteral(" — does NOT match the request")));
+}
+
+void CameraWorker::cmdCaptureZoneEdge(const QString &edge) {
+    const QString a = QStringLiteral("zone edge %1").arg(edge);
+    if (!requireDevice(a)) return;
+    float xyz[3] = {0, 0, 0};   // same layout as cmdPresetCapture: [1]=pitch, [2]=yaw
+    if (m_dev->gimbalGetAttitudeInfoR(xyz) != RM_RET_OK) {
+        emit zoneEdgeCaptured(edge, false, 0.0);
+        emit logLine("warn", a + QStringLiteral(": read attitude failed"));
+        return;
+    }
+    const bool pan = edge.startsWith(QLatin1String("pan"));
+    const double v = pan ? xyz[2] : xyz[1];
+    emit zoneEdgeCaptured(edge, true, v);
+    emit logLine("ok", QStringLiteral("%1: current %2 = %3° (Apply zone to store it)")
+                           .arg(a, pan ? QStringLiteral("yaw") : QStringLiteral("pitch"))
+                           .arg(v, 0, 'f', 1));
+}
+
+void CameraWorker::cmdSetZoneTracking(bool on) {
+    const QString a = QStringLiteral("zone tracking");
+    if (!requireDevice(a)) return;
+    emit logLine("cmd", QStringLiteral("→ zone tracking %1").arg(on ? "on" : "off"));
+    const int tracker = on ? int(Device::DevTrackTypeLimitArea) : int(Device::DevTrackTypeNormal);
+    const int rc = m_dev->aiSetControlParaR(Device::DevControlTargetTypeHuman,
+                                            Device::DevControlParaTypeTrackerType, tracker);
+    bool tracking = false;
+    float cur[4];
+    const bool ok = readZone(tracking, cur) && tracking == on;
+    emit commandResult(a, ok, rc, on ? QStringLiteral("on") : QStringLiteral("off"));
+    emit logLine(ok ? "ok" : "warn", QStringLiteral("zone tracking %1  rc=%2%3")
+                                         .arg(on ? "on" : "off").arg(rc)
+                                         .arg(ok ? QString() : QStringLiteral(" — device state does NOT match")));
 }
 
 void CameraWorker::cmdPresetCapture(int idx) {

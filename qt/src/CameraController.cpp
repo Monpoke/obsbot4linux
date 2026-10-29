@@ -13,8 +13,15 @@ namespace {
 // Mirror of the SDK's AiWorkModeType values we use (see dev.hpp:554). Kept as
 // local constants so this GUI-thread TU doesn't need the SDK headers.
 constexpr int kAiNone = 0;    // AiWorkModeNone
+constexpr int kAiGroup = 1;   // AiWorkModeGroup (multi-person tracking)
 constexpr int kAiHuman = 2;   // AiWorkModeHuman (single-person tracking)
 constexpr int kAiSwitching = 6;
+
+// Auto-zoom options (autoZoom index) -> DevTargetZoomType, and the ai_sub_mode
+// the Tiny 3 reports for each (hardware-verified; Off reads back as 2, the
+// same value as Upper body).
+constexpr int kAutoZoomType[6] = {0, 1, 2, 3, 5, 6};   // Normal, FullBody, HalfBody, CloseUp, GropHeadless, GropLowerBody
+constexpr int kAutoZoomSub[6] = {2, 1, 2, 3, 5, 6};
 
 // NOTE: contains a UTF-8 degree sign — convert with fromUtf8, never fromLatin1
 // (fromLatin1 renders it as the "78Â°" mojibake Rex saw in the log).
@@ -63,6 +70,23 @@ CameraController::CameraController(QObject *parent) : QObject(parent) {
     connect(m_worker, &CameraWorker::auxStatus, this, &CameraController::onAuxStatus);
     connect(m_worker, &CameraWorker::zoomUpdate, this, &CameraController::onZoomUpdate);
     connect(m_worker, &CameraWorker::imageParams, this, &CameraController::onImageParams);
+    connect(m_worker, &CameraWorker::zoneParams, this, &CameraController::onZoneParams);
+    connect(m_worker, &CameraWorker::zoneEdgeCaptured, this,
+            [this](const QString &edge, bool ok, double value) {
+                if (ok) emit zoneEdgeCaptured(edge, value);
+            });
+    connect(m_worker, &CameraWorker::aiSubModeUpdate, this, [this](int sub) {
+        // Only meaningful while tracking. Keep the current choice when it
+        // already explains the readback (Off vs Upper body share value 2).
+        if (!m_aiTracking || m_aiPending || kAutoZoomSub[m_autoZoom] == sub) return;
+        for (int i = 1; i < 6; ++i) {
+            if (kAutoZoomSub[i] == sub) { m_autoZoom = i; emit aiChanged(); return; }
+        }
+    });
+    connect(m_worker, &CameraWorker::trackSpeedUpdate, this, [this](int idx) {
+        m_trackSpeed = idx;
+        emit trackSpeedChanged();
+    });
     connect(m_worker, &CameraWorker::commandResult, this, &CameraController::onWorkerResult);
     connect(m_worker, &CameraWorker::presetCaptured, this, &CameraController::onPresetCaptured);
 
@@ -333,13 +357,34 @@ void CameraController::zoomReset() {
 
 void CameraController::setAiTracking(bool on) {
     if (on == aiTracking()) { emit aiChanged(); return; }
+    sendAiTrack(on);
+}
+
+void CameraController::setTrackTarget(int target) {
+    target = (target == 1) ? 1 : 0;
+    if (target == m_trackTarget) { emit aiChanged(); return; }
+    m_trackTarget = target;
+    if (aiTracking()) sendAiTrack(true);   // switch Solo <-> Group live
+    else emit aiChanged();
+}
+
+void CameraController::setAutoZoom(int idx) {
+    idx = idx < 0 ? 0 : (idx > 5 ? 5 : idx);
+    m_autoZoom = idx;   // optimistic; the next status push's ai_sub_mode confirms
+    QMetaObject::invokeMethod(m_worker, "cmdSetAutoZoom", Qt::QueuedConnection,
+                              Q_ARG(int, kAutoZoomType[idx]));
+    emit aiChanged();
+}
+
+void CameraController::sendAiTrack(bool on) {
     m_targetTracking = on;
     m_targetFace = faceFocus();      // preserve the independent face-focus leg's display
     ++m_aiInFlight;
     m_aiPending = true;              // suppress status-push fighting until confirmed (#8)
     m_pendingTimer->start();
+    const int mode = !on ? kAiNone : (m_trackTarget == 1 ? kAiGroup : kAiHuman);
     QMetaObject::invokeMethod(m_worker, "cmdSetAi", Qt::QueuedConnection,
-                              Q_ARG(int, on ? kAiHuman : kAiNone), Q_ARG(int, 0),
+                              Q_ARG(int, mode), Q_ARG(int, 0),
                               Q_ARG(QString, on ? QStringLiteral("ai track on")
                                                 : QStringLiteral("ai track off")));
     emit aiChanged();
@@ -379,15 +424,39 @@ void CameraController::setGesture(bool on) {
 }
 
 void CameraController::setHdr(bool on) {
-    if (!m_hdrSupport) {
-        emit logLine("warn", QStringLiteral("hdr: device reports HDR not supported in this mode"));
-        return;
-    }
     m_targetHdr = on;
     m_hdrOn = on;        // optimistic; onWorkerResult confirms/reverts
     m_hdrPending = true; // suppress the status push clobbering the optimistic value (#8)
     QMetaObject::invokeMethod(m_worker, "cmdSetHdr", Qt::QueuedConnection, Q_ARG(bool, on));
     emit imageChanged();
+}
+
+void CameraController::setTrackSpeed(int idx) {
+    QMetaObject::invokeMethod(m_worker, "cmdSetTrackSpeed", Qt::QueuedConnection, Q_ARG(int, idx));
+}
+
+void CameraController::setZoneLimits(double panMin, double panMax, double pitchMin, double pitchMax) {
+    if (panMin >= panMax || pitchMin >= pitchMax) {
+        emit logLine("warn", QStringLiteral("zone limits: each min must be below its max"));
+        emit commandResult(QStringLiteral("zone limits"), false, QStringLiteral("min must be below max"));
+        return;
+    }
+    QMetaObject::invokeMethod(m_worker, "cmdSetZoneLimits", Qt::QueuedConnection,
+                              Q_ARG(double, panMin), Q_ARG(double, panMax),
+                              Q_ARG(double, pitchMin), Q_ARG(double, pitchMax));
+}
+
+void CameraController::resetZoneLimits() {
+    setZoneLimits(m_zoneDefPanMin, m_zoneDefPanMax, m_zoneDefPitchMin, m_zoneDefPitchMax);
+}
+
+void CameraController::captureZoneEdge(const QString &edge) {
+    QMetaObject::invokeMethod(m_worker, "cmdCaptureZoneEdge", Qt::QueuedConnection,
+                              Q_ARG(QString, edge));
+}
+
+void CameraController::setZoneTracking(bool on) {
+    QMetaObject::invokeMethod(m_worker, "cmdSetZoneTracking", Qt::QueuedConnection, Q_ARG(bool, on));
 }
 
 void CameraController::setImageParam(const QString &param, int value) {
@@ -591,6 +660,11 @@ void CameraController::onDeviceLost(const QString &reason) {
     m_autoSleepDevice = -1;
     m_hadDevice = false;   // a real loss: the next connect is genuine → preset re-fires
     m_zoomValid = false;
+    m_zoneValid = false;
+    m_zoneTracking = false;
+    m_trackSpeed = -1;
+    emit zoneChanged();
+    emit trackSpeedChanged();
     emit connStateChanged();
     emit statusChanged();
     emit aiChanged();
@@ -637,6 +711,9 @@ void CameraController::onStatusUpdate(int runState, int aiModeRaw, double zoom, 
     if (!m_aiPending && aiModeRaw != kAiSwitching) {
         const bool was = m_aiTracking;
         m_aiTracking = (aiModeRaw > kAiNone);
+        // Solo/Group selector follows the device while it is tracking.
+        if (aiModeRaw == kAiHuman) m_trackTarget = 0;
+        else if (aiModeRaw == kAiGroup) m_trackTarget = 1;
         // Device-side disengage right after we enabled tracking: the Tiny 3
         // accepts AI-Track ON (rc=0) but silently drops back to None when it
         // can't lock onto a person. Without this hint the chip just flips off
@@ -672,6 +749,24 @@ void CameraController::onImageParams(int brightness, int contrast, int saturatio
     m_saturation = saturation;
     m_sharpness = sharpness;
     emit imageChanged();
+}
+
+void CameraController::onZoneParams(bool ok, bool tracking, double panMin, double panMax,
+                                    double pitchMin, double pitchMax, double defPanMin,
+                                    double defPanMax, double defPitchMin, double defPitchMax) {
+    m_zoneValid = ok;
+    if (ok) {
+        m_zoneTracking = tracking;
+        m_zonePanMin = panMin;
+        m_zonePanMax = panMax;
+        m_zonePitchMin = pitchMin;
+        m_zonePitchMax = pitchMax;
+        m_zoneDefPanMin = defPanMin;
+        m_zoneDefPanMax = defPanMax;
+        m_zoneDefPitchMin = defPitchMin;
+        m_zoneDefPitchMax = defPitchMax;
+    }
+    emit zoneChanged();
 }
 
 void CameraController::onZoomUpdate(double zoom, bool valid) {

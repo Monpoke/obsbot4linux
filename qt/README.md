@@ -131,14 +131,19 @@ and the gesture toggle.
 ## Capability gating (honesty)
 
 **Wired (verified SDK calls):** PTZ nudge/center and velocity hold-to-move, zoom,
-FOV, wake/sleep, AI Track (`cameraSetAiModeU`), Face autofocus
-(`cameraSetFaceFocusR`), Gesture control (`aiSetGestureCtrlIndividualR`), and
-image Brightness/Contrast/Saturation/Sharpness (`cameraSetImage*R`, 0–100).
+FOV, wake/sleep, AI Track Solo/Group (`cameraSetAiModeU` Human/Group), motion
+speed (`aiSetControlParaR` `GimCtrlSpeedMode`), auto-zoom framing
+(`aiSetTargetZoomTypeR`, Solo only), tracking zone (`aiSetControlParaR`
+`LimitPan*`/`LimitPitch*`/`TrackerType`), Face autofocus
+(`cameraSetFaceFocusR`), Gesture control (`aiSetGestureCtrlIndividualR`),
+image Brightness/Contrast/Saturation/Sharpness (`cameraSetImage*R`, 0–100), and
+HDR (`cameraSetWdrR` — works on Tiny 3 although it reports `hdr_support` 0).
+All verified on a Tiny 3 by device readback, since its rc is 0 even for
+ignored commands. AI tracking needs an open video stream. Details:
+[docs/dev/OBSBOT_CLAUDE.md](../docs/dev/OBSBOT_CLAUDE.md#capability-gating-honesty).
 
 **Gated OFF** (no verified Tiny 3 setters, shown disabled with a hint, never
-faked): HDR/WDR (the SDK's `cameraSetWdrR` is not a Tiny 3 category and
-`hdr_support` reports 0), white balance, color temp, exposure, and advanced
-tracking (framing/sensitivity/motion speed/zone).
+faked): white balance, color temp, exposure, and tracking sensitivity.
 
 ## PTZ safety
 

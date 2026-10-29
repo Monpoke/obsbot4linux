@@ -20,8 +20,9 @@ There's no official OBSBOT control app for Linux. This fills that gap with a com
 - **PTZ control** — a **draggable joystick** for continuous hold-to-move (with proper safety stops: stop on release / window-blur / SDK error / dead-man timeout) *plus* precise **arrow nudges** (one bounded step per tap). Configurable step (2° / 5° / 10°) and speed.
 - **Zoom & FOV** — 1.0–2.0× zoom, and Wide / Medium / Narrow field of view.
 - **Wake / Sleep / Center**, and optional **sleep-on-exit**.
-- **AI tracking** — AI Track (the camera follows a person and keeps their face framed; the ring LED turns blue), Face autofocus, and Gesture control.
-- **Image tuning** — Brightness / Contrast / Saturation / Sharpness (0–100) with one-click reset.
+- **AI tracking** — AI Track (the camera follows you; the ring LED turns blue) in **Solo** or **Group** mode, **motion speed** (Slow / Std / Fast), **auto zoom** framing (Off / Full body / Upper body / Close-up / Headless / Lower body, Solo only), Face autofocus, and Gesture control. AI tracking needs an open video stream (the in-app preview, OBS, …) — without one the camera accepts the command but does not follow.
+- **Tracking zone** — limit-area tracking laid out like the official Windows app: a square with one value per side (pan left/right, tilt up/down, in degrees), −/+ buttons, **right-click a side to take the camera's current position**, Apply, then toggle zone tracking on/off. The zone is stored in the camera.
+- **Image tuning** — Brightness / Contrast / Saturation / Sharpness (0–100) with one-click reset, and **HDR** on/off.
 - **Presets** — three saved pan/tilt/zoom/FOV positions with save / recall / overwrite / clear, **load-a-preset on startup or wake**, and **return-to-a-preset after AI is turned off**.
 - **Embedded live preview** — the camera's real video stream right in the app window, at a selectable resolution (1080p30 / 1080p60 / 720p60 / 4K30), with an external `ffplay` window kept as a fallback. No fake/placeholder video is ever shown.
 - **Activity log** — every command and its real SDK return code, so you always know what the camera actually did.
@@ -36,7 +37,13 @@ Settings and presets persist to `~/.config/obsbot4linux/obsbot4linux.json`.
 
 ## Honest by default
 
-Where the camera / SDK genuinely supports a feature, it's wired to a real call and its result is logged. Where support is unverified or absent, the control is **shown disabled with a clear reason** instead of pretending to work. For example, on the Tiny 3 the SDK does not expose HDR, white balance, exposure, or advanced tracking parameters — so those are labeled as such, not faked. No placeholder video, no invented status values.
+Where the camera / SDK genuinely supports a feature, it's wired to a real call and its result is logged. Where support is unverified or absent, the control is **shown disabled with a clear reason** instead of pretending to work. For example, white balance, exposure and tracking sensitivity are not verified on the Tiny 3 — so those are labeled as such, not faked. No placeholder video, no invented status values.
+
+Everything that is exposed was verified on a real Tiny 3 (firmware 6.6.11.1) by reading the setting back from the device, not by trusting the SDK return code — the Tiny 3 answers "success" even to commands it ignores. A few findings that differ from the SDK documentation:
+
+- **Tracking speed and tracking zone** use the newer control-parameter API (`aiSetControlParaR`: `GimCtrlSpeedMode`, `LimitPan*` / `LimitPitch*`, `TrackerType`). The older `aiSetTrackSpeedTypeR` and `LimitedZoneTrack` calls have no effect on the Tiny 3.
+- **Zone tilt limits are stored down-positive** by the camera; the app shows them up-positive, exactly like the Windows app.
+- **HDR works** (`cameraSetWdrR`, read back from the status) even though the camera reports `hdr_support = 0`.
 
 ## Quick start
 

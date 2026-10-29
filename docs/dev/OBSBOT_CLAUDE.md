@@ -201,12 +201,29 @@ building the Qt app correctly rather than patching GTK.)
 (`cameraSetAiModeU` Human), Face focus (`cameraSetFaceFocusR`), Gesture control
 (`aiSetGestureCtrlIndividualR`), image Brightness/Contrast/Saturation/Sharpness
 (`cameraSetImage*R`, SDK range 0–100, live values read on connect), and HDR
-(`cameraSetWdrR`) **gated on the device-reported `hdr_support`** for the current
-mode (`cam.capHdr`) — disabled with a note when the device says it's unsupported.
+(`cameraSetWdrR`). HDR is NOT gated on `hdr_support`: the Tiny 3 reports 0 but
+applies the command (status `hdr` reads back 1/0, image visibly changes).
+
+**Tracking (verified on Tiny 3 fw 6.6.11.1, by device readback + by eye):**
+- Solo / Group: `cameraSetAiModeU(AiWorkModeHuman / AiWorkModeGroup)`.
+- Motion speed: `aiSetControlParaR(Human, GimCtrlSpeedMode)` — UI Slow/Std/Fast =
+  SuperLazy(0)/Slow(2)/Fast(3); device default 2; read back on connect.
+  `aiSetTrackSpeedTypeR` returns rc=0 but has NO effect on Tiny 3.
+- Auto zoom framing: `aiSetTargetZoomTypeR` (Normal/FullBody/HalfBody/CloseUp/
+  GropHeadless/GropLowerBody); readback = status `ai_sub_mode` (2/1/2/3/5/6 —
+  Off and Upper share 2). Only acts while tracking in Solo; ignored in Group.
+- Tracking zone: `aiSet/GetControlParaR(Human, LimitPanMin/Max, LimitPitchMin/Max)`
+  + `TrackerType` (0 Normal, 1 LimitArea). The `LimitedZoneTrack` API times out
+  on Tiny 3. LimitPitch is stored DOWN-positive (the worker negates + swaps it,
+  `flipZonePitch`); the UI square matches the Windows app (left = PanMax, right =
+  PanMin, top/bottom = tilt up-positive), verified by reading back a zone typed
+  in the Windows app. Right-click a side = `gimbalGetAttitudeInfoR` yaw/pitch.
+- All AI tracking needs an OPEN video stream (preview / OBS); without one the
+  camera accepts the command and does nothing. rc=0 proves nothing on Tiny 3 —
+  always read back.
 
 **Still gated OFF** (no verified Tiny 3 setters): white balance, color temp,
-exposure, and advanced tracking (framing/sensitivity/motion speed/zone) — shown
-disabled with a hint, never faked.
+exposure, and tracking sensitivity — shown disabled with a hint, never faked.
 
 ## Post-hardware feedback (Rex, real Tiny 3)
 

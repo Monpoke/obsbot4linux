@@ -1,8 +1,8 @@
 // Image & Exposure.
 //   * Brightness / Contrast / Saturation / Sharpness — WIRED (SDK 0–100, live
 //     values read on connect, applied on release).
-//   * HDR — NOT available on Tiny 3 (SDK HDR/WDR is for tiny4k/tiny2/meet/tail-
-//     air; Tiny 3 reports hdr_support=0 in every mode). Shown as an honest note.
+//   * HDR — WIRED (cameraSetWdrR). The Tiny 3 reports hdr_support=0, but it
+//     applies the command and the status push reads back hdr=1/0 (verified).
 //   * White balance / Color temp / Exposure — still capability-gated OFF (not
 //     verified on the Tiny 3 SDK), shown disabled with an honest hint.
 import QtQuick
@@ -96,20 +96,15 @@ RowLayout {
 
                 Rectangle { Layout.fillWidth: true; height: 1; color: Theme.border }
 
-                // HDR — the SDK's HDR/WDR control is documented for tiny4k/tiny2/
-                // meet/tail-air, NOT tiny3, and the Tiny 3 reports hdr_support=0
-                // in every mode (incl. 1080p30). So HDR is not exposed on Tiny 3
-                // via this SDK; shown as an honest note rather than a dead toggle.
-                // (Tip: 1080p30 already looks crisper than 1080p60 simply because
-                //  30fps compresses less — that's framerate, not HDR.)
-                RowLayout {
-                    spacing: 10
-                    Text { text: "HDR"; color: Theme.dim; font.family: Theme.mono; font.pixelSize: 12; Layout.preferredWidth: 96 }
-                    Text {
-                        text: "not available on the Tiny 3 (not exposed by the SDK)"
-                        color: Theme.dimmer; font.family: Theme.mono; font.pixelSize: 11
-                        Layout.fillWidth: true; wrapMode: Text.WordWrap
-                    }
+                // HDR — cameraSetWdrR. The Tiny 3 reports hdr_support=0 yet applies
+                // it (status push reads back hdr=1/0), so the toggle ignores that
+                // flag; its state is the device readback.
+                ToggleChip {
+                    Layout.fillWidth: true
+                    text: "HDR"; tone: Theme.live
+                    enabled: cam.connected && cam.capHdr
+                    checked: cam.hdrOn
+                    onToggled: (c) => cam.setHdr(c)
                 }
             }
         }

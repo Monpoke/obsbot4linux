@@ -51,6 +51,13 @@ class CameraController : public QObject {
     // it is portrait-orientation tracking, not face tracking.)
     Q_PROPERTY(bool aiTracking READ aiTracking NOTIFY aiChanged)
     Q_PROPERTY(bool faceFocus READ faceFocus NOTIFY aiChanged)
+    // Who AI Track follows: 0=Solo (AiWorkModeHuman), 1=Group (AiWorkModeGroup).
+    // Synced from the device's ai_mode while tracking; the next mode otherwise.
+    Q_PROPERTY(int trackTarget READ trackTarget WRITE setTrackTarget NOTIFY aiChanged)
+    // AI auto-zoom framing: 0=Off, 1=Full body, 2=Upper body, 3=Close-up,
+    // 4=Headless, 5=Lower body. Synced from the device's ai_sub_mode while
+    // tracking (Off and Upper body share one readback value on Tiny 3).
+    Q_PROPERTY(int autoZoom READ autoZoom WRITE setAutoZoom NOTIFY aiChanged)
     Q_PROPERTY(bool gesture READ gesture NOTIFY aiChanged)
     Q_PROPERTY(bool hdrOn READ hdrOn NOTIFY imageChanged)
     Q_PROPERTY(bool aiPending MEMBER m_aiPending NOTIFY aiChanged)
@@ -69,6 +76,8 @@ class CameraController : public QObject {
     // default so normal behavior is unchanged; kept toggleable for A/B testing
     // across firmware updates.
     Q_PROPERTY(bool gestureLowTraffic READ gestureLowTraffic WRITE setGestureLowTraffic NOTIFY settingsChanged)
+    // AI tracking speed, 0=Slow, 1=Standard, 2=Fast: device readback (-1 = unknown).
+    Q_PROPERTY(int trackSpeed READ trackSpeed WRITE setTrackSpeed NOTIFY trackSpeedChanged)
     // Device power/sleep behavior. Index 0 = "Device" (don't manage). SDK docs
     // omit the Tiny 3 for both underlying calls — micSleepDevice is the honest
     // device-reported readback (-1 until the first status push).
@@ -86,6 +95,20 @@ class CameraController : public QObject {
     Q_PROPERTY(int contrast MEMBER m_contrast NOTIFY imageChanged)
     Q_PROPERTY(int saturation MEMBER m_saturation NOTIFY imageChanged)
     Q_PROPERTY(int sharpness MEMBER m_sharpness NOTIFY imageChanged)
+
+    // ----- zone (limit-area) tracking: live device values, degrees -----
+    // zoneValid=false until the device answers the zone getters. zoneDef* are
+    // the device's default (widest) limits, used as the editing bounds.
+    Q_PROPERTY(bool zoneValid MEMBER m_zoneValid NOTIFY zoneChanged)
+    Q_PROPERTY(bool zoneTracking MEMBER m_zoneTracking NOTIFY zoneChanged)
+    Q_PROPERTY(double zonePanMin MEMBER m_zonePanMin NOTIFY zoneChanged)
+    Q_PROPERTY(double zonePanMax MEMBER m_zonePanMax NOTIFY zoneChanged)
+    Q_PROPERTY(double zonePitchMin MEMBER m_zonePitchMin NOTIFY zoneChanged)
+    Q_PROPERTY(double zonePitchMax MEMBER m_zonePitchMax NOTIFY zoneChanged)
+    Q_PROPERTY(double zoneDefPanMin MEMBER m_zoneDefPanMin NOTIFY zoneChanged)
+    Q_PROPERTY(double zoneDefPanMax MEMBER m_zoneDefPanMax NOTIFY zoneChanged)
+    Q_PROPERTY(double zoneDefPitchMin MEMBER m_zoneDefPitchMin NOTIFY zoneChanged)
+    Q_PROPERTY(double zoneDefPitchMax MEMBER m_zoneDefPitchMax NOTIFY zoneChanged)
 
     // ----- capability gating -----
     Q_PROPERTY(bool capAi READ capAi CONSTANT)
@@ -122,6 +145,8 @@ public:
     bool asleep() const { return m_runState == Asleep; }
     bool aiTracking() const;
     bool faceFocus() const;
+    int trackTarget() const { return m_trackTarget; }
+    int autoZoom() const { return m_autoZoom; }
     bool gesture() const;
     bool hdrOn() const { return m_hdrOn; }
     int moveStepDeg() const { return m_settings.moveStepDeg; }
@@ -133,6 +158,7 @@ public:
     QString previewRes() const;   // e.g. "1080p60"
     bool sleepOnExit() const { return m_settings.sleepOnExit; }
     bool gestureLowTraffic() const { return m_settings.gestureLowTraffic; }
+    int trackSpeed() const { return m_trackSpeed; }
     int autoSleepIndex() const { return m_settings.autoSleepIdx; }
     int micSleepIndex() const { return m_settings.micSleepIdx; }
     QString appVersion() const;
@@ -142,8 +168,9 @@ public:
     bool capFov() const { return true; }
     bool capImage() const { return true; }          // brightness/contrast/sat/sharp: SDK 0–100
     bool capGesture() const { return true; }        // aiSetGestureCtrlIndividualR (rc reported honestly)
-    bool capHdr() const { return m_hdrSupport; }    // device-reported hdr_support for the current mode
-    bool capTrackingAdvanced() const { return false; }   // framing/sensitivity/zone unverified
+    // The Tiny 3 reports hdr_support=0 but applies cameraSetWdrR (readback hdr=1/0).
+    bool capHdr() const { return true; }
+    bool capTrackingAdvanced() const { return false; }   // framing/sensitivity unverified
     QString capUnverifiedReason() const {
         return QStringLiteral("Not verified against the Tiny 3 SDK — disabled to stay honest.");
     }
@@ -161,6 +188,7 @@ public slots:
     void setPreviewResIndex(int idx);
     void setSleepOnExit(bool on);
     void setGestureLowTraffic(bool on);
+    void setTrackSpeed(int idx);
     void setAutoSleepIndex(int idx);
     void setMicSleepIndex(int idx);
     void resetImageDefaults();     // set brightness/contrast/saturation/sharpness to 50
@@ -174,11 +202,20 @@ public slots:
     void zoomOut();
     void zoomReset();
     void setAiTracking(bool on);      // Human tracking on/off (the real Tiny3 tracking)
+    void setTrackTarget(int target);  // 0=Solo, 1=Group; re-sent live if tracking
+    void setAutoZoom(int idx);        // see autoZoom property
     void setFaceFocus(bool on);       // face autofocus on/off (independent — no gimbal motion)
     void setGesture(bool on);         // gesture control on/off
     void gestureQuietTest();          // 60 s SDK-traffic pause (gesture diagnostic)
-    void setHdr(bool on);             // HDR/WDR on/off (only when capHdr)
+    void setHdr(bool on);             // HDR/WDR on/off (cameraSetWdrR)
     void setImageParam(const QString &param, int value);  // brightness/contrast/saturation/sharpness
+    // Zone tracking: set the max zone first, then enable/disable zone tracking.
+    void setZoneLimits(double panMin, double panMax, double pitchMin, double pitchMax);
+    void resetZoneLimits();          // apply the device's default limits
+    void setZoneTracking(bool on);
+    // Fill one zone edge ("panMin"/"panMax"/"pitchMin"/"pitchMax") from the
+    // camera's current position; result arrives via zoneEdgeCaptured.
+    void captureZoneEdge(const QString &edge);
     void rescan();
     void launchPreview();   // FALLBACK: (re)launch the external ffplay preview
     void stopPreview();     // terminate the ffplay preview (also called on shutdown)
@@ -205,6 +242,9 @@ signals:
     void imageChanged();
     void settingsChanged();
     void presetsChanged();
+    void zoneChanged();
+    void trackSpeedChanged();
+    void zoneEdgeCaptured(const QString &edge, double value);
     void logLine(const QString &kind, const QString &message);
     void commandResult(const QString &action, bool ok, const QString &message);
     void discoveryFinished(bool found);   // one-shot, used by --self-test
@@ -217,6 +257,9 @@ private slots:
     void onAuxStatus(bool faceFocus, bool hdrOn, bool hdrSupport, int fps, int sleepMicro, int autoSleepSec);
     void onZoomUpdate(double zoom, bool valid);
     void onImageParams(int brightness, int contrast, int saturation, int sharpness);
+    void onZoneParams(bool ok, bool tracking, double panMin, double panMax, double pitchMin,
+                      double pitchMax, double defPanMin, double defPanMax, double defPitchMin,
+                      double defPitchMax);
     void onWorkerResult(const QString &action, bool ok, int rc, const QString &message);
     void onPresetCaptured(int idx, double pitch, double yaw, double zoom, int fov);
 
@@ -231,6 +274,9 @@ private:
     void scheduleStartupPreset(const QString &why);
     // Delayed, guarded push of the managed power/sleep settings (see impl).
     void applyPowerSettings(const QString &why);
+    // Sends AI Track on (in the current trackTarget mode) or off, with the
+    // pending/in-flight bookkeeping shared by setAiTracking/setTrackTarget.
+    void sendAiTrack(bool on);
 
     QThread m_thread;
     CameraWorker *m_worker = nullptr;
@@ -250,6 +296,8 @@ private:
 
     // Confirmed AI state (what the device actually is, per success/status).
     bool m_aiTracking = false;   // ai_mode == AiWorkModeHuman (owns gimbal)
+    int m_trackTarget = 0;       // 0=Solo, 1=Group (see trackTarget property)
+    int m_autoZoom = 0;          // see autoZoom property
     bool m_faceFocus = false;    // face autofocus engaged (independent, does NOT own gimbal)
     bool m_gesture = false;      // gesture control (intent; SDK has no clean status readback)
     bool m_hdrOn = false;        // from status tiny.hdr
@@ -278,6 +326,13 @@ private:
 
     // Live image params (0–100), mirrored from the device on connect + on change.
     int m_brightness = 50, m_contrast = 50, m_saturation = 50, m_sharpness = 50;
+
+    // Zone tracking mirror (device readback after every zone command).
+    int m_trackSpeed = -1;       // device GimCtrlSpeedMode as UI index (-1 unknown)
+    bool m_zoneValid = false;
+    bool m_zoneTracking = false;
+    double m_zonePanMin = 0, m_zonePanMax = 0, m_zonePitchMin = 0, m_zonePitchMax = 0;
+    double m_zoneDefPanMin = 0, m_zoneDefPanMax = 0, m_zoneDefPitchMin = 0, m_zoneDefPitchMax = 0;
     int m_fps = 0;               // current video stream fps (from status)
     int m_micSleepDevice = -1;   // device-reported mic-during-sleep (readback; -1 unknown)
     int m_autoSleepDevice = -1;  // device-reported auto-sleep seconds (readback; -1 unknown, 0 never)
